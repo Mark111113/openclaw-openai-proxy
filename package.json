@@ -1,0 +1,10 @@
+{
+  "name": "openclaw-openai-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Prototype OpenAI-compatible proxy that routes requests through OpenClaw",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
