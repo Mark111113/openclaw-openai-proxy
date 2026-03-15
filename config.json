@@ -1,9 +1,9 @@
 {
   "host": "0.0.0.0",
-  "port": 8787,
+  "port": 8780,
   "apiKey": "mcquay2011",
   "corsOrigin": "*",
-  "agent": "main",
+  "agent": "st",
   "publicModel": "openclaw/main",
   "upstreamModel": "bailian/kimi-k2.5",
   "thinking": "",
