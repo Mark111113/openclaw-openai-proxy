@@ -140,6 +140,11 @@ function sendJson(res, status, obj) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
   res.end(body);
 }
+function sendHtml(res, status, html) {
+  applyCors(res);
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(html) });
+  res.end(html);
+}
 function sendNoContent(res) {
   applyCors(res);
   res.writeHead(204);
@@ -355,6 +360,110 @@ function readUsageRecords(limit = 50) {
   const raw = fs.readFileSync(USAGE_LOG_PATH, 'utf8');
   return raw.split(/\r?\n/).filter(Boolean).slice(-Math.max(1, Math.min(limit, 500))).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean).reverse();
 }
+
+function renderDebugPage(rows) {
+  const escapedRows = rows.map((row) => ({
+    ts: String(row.ts || ''),
+    endpoint: String(row.endpoint || ''),
+    stream: String(Boolean(row.stream)),
+    mode: String(row.mode || ''),
+    agent: String(row.agent || ''),
+    publicModel: String(row.publicModel || ''),
+    configuredUpstreamModel: String(row.configuredUpstreamModel || ''),
+    actualUpstreamModel: String(row.actualUpstreamModel || ''),
+    actualProvider: String(row.actualProvider || ''),
+    sessionKey: String(row.sessionKey || ''),
+    prompt_tokens: Number(row.prompt_tokens || 0),
+    completion_tokens: Number(row.completion_tokens || 0),
+    total_tokens: Number(row.total_tokens || 0),
+  }));
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Claw Proxy Debug Usage</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 24px; background: #0b1020; color: #e5e7eb; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    p { color: #94a3b8; }
+    .meta { margin: 12px 0 18px; display: flex; gap: 12px; flex-wrap: wrap; }
+    .pill { background: #172036; border: 1px solid #2a3a5f; border-radius: 999px; padding: 6px 10px; font-size: 12px; color: #cbd5e1; }
+    .toolbar { margin: 16px 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    input { background: #111827; color: #e5e7eb; border: 1px solid #334155; border-radius: 8px; padding: 8px 10px; }
+    button { background: #2563eb; color: white; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid #24324d; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { position: sticky; top: 0; background: #0f172a; }
+    tr:hover td { background: #10192d; }
+    .wrap { overflow-x: auto; border: 1px solid #24324d; border-radius: 12px; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <h1>Claw Proxy Debug Usage</h1>
+  <p>Read-only recent request view. This page is intentionally public on <code>/debug/</code>. API endpoints remain protected.</p>
+  <div class="meta">
+    <div class="pill">rows: ${escapedRows.length}</div>
+    <div class="pill">source: ${USAGE_LOG_PATH}</div>
+    <div class="pill">auto refresh: 15s</div>
+  </div>
+  <div class="toolbar">
+    <label>limit <input id="limit" type="number" min="1" max="500" value="50" /></label>
+    <button id="reloadBtn">Reload</button>
+  </div>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Endpoint</th>
+          <th>Mode</th>
+          <th>Agent</th>
+          <th>Public Model</th>
+          <th>Actual Upstream</th>
+          <th>Provider</th>
+          <th>Session</th>
+          <th class="num">Prompt</th>
+          <th class="num">Completion</th>
+          <th class="num">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${escapedRows.map((row) => `
+        <tr>
+          <td>${row.ts}</td>
+          <td>${row.endpoint}${row.stream === 'true' ? ' · stream' : ''}</td>
+          <td>${row.mode}</td>
+          <td>${row.agent}</td>
+          <td>${row.publicModel}<div class="muted">cfg: ${row.configuredUpstreamModel || '-'}</div></td>
+          <td>${row.actualUpstreamModel || '-'}</td>
+          <td>${row.actualProvider || '-'}</td>
+          <td>${row.sessionKey}</td>
+          <td class="num">${row.prompt_tokens}</td>
+          <td class="num">${row.completion_tokens}</td>
+          <td class="num">${row.total_tokens}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>
+  </div>
+  <script>
+    const limitInput = document.getElementById('limit');
+    const reload = () => {
+      const limit = Math.max(1, Math.min(500, Number(limitInput.value || 50)));
+      const url = new URL(window.location.href);
+      url.searchParams.set('limit', String(limit));
+      window.location.href = url.toString();
+    };
+    document.getElementById('reloadBtn').addEventListener('click', reload);
+    setTimeout(() => window.location.reload(), 15000);
+  </script>
+</body>
+</html>`;
+}
+
 function makeChatCompletionResponse({ model, messageText, promptTokens, completionTokens, meta }) {
   const created = Math.floor(Date.now() / 1000);
   return maybeAttachMeta({ id: `chatcmpl-${randomUUID()}`, object: 'chat.completion', created, model, choices: [{ index: 0, message: { role: 'assistant', content: messageText }, finish_reason: 'stop' }], usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens } }, meta);
@@ -428,11 +537,17 @@ async function handleGeneration({ req, res, body, endpoint }) {
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'OPTIONS') return sendNoContent(res);
-    if (!requireAuth(req, res)) return;
     const url = new URL(req.url || '/', `http://${req.headers.host || `${OPENCLAW_HOST}:${PORT}`}`);
 
+    if (req.method === 'GET' && (url.pathname === '/debug' || url.pathname === '/debug/')) {
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || 50), 500));
+      return sendHtml(res, 200, renderDebugPage(readUsageRecords(limit)));
+    }
+
+    if (!requireAuth(req, res)) return;
+
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health')) {
-      return sendJson(res, 200, { ok: true, service: 'openclaw-openai-proxy', configPath: CONFIG_PATH, routesPath: ROUTES_PATH, host: OPENCLAW_HOST, port: PORT, includeOpenClawMeta: INCLUDE_OPENCLAW_META, endpoints: ['/v1/models', '/v1/chat/completions', '/v1/completions', '/debug/usage'] });
+      return sendJson(res, 200, { ok: true, service: 'openclaw-openai-proxy', configPath: CONFIG_PATH, routesPath: ROUTES_PATH, host: OPENCLAW_HOST, port: PORT, includeOpenClawMeta: INCLUDE_OPENCLAW_META, endpoints: ['/v1/models', '/v1/chat/completions', '/v1/completions', '/debug/usage', '/debug/'] });
     }
     if (req.method === 'GET' && url.pathname === '/debug/usage') {
       const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || 50), 500));
