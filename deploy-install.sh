@@ -64,12 +64,14 @@ systemctl restart "$SERVICE_NAME"
 sleep 2
 systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,40p'
 
+PORT="$(python3 - "$PROJECT_DIR/config.json" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+print(json.loads(p.read_text()).get('port', 8780))
+PY
+)"
+
 echo
 echo "Health check:"
-curl -s http://127.0.0.1:$(python3 - <<'PY'
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[1])
-print(json.loads(p.read_text()).get('port',8780))
-PY
-"$PROJECT_DIR/config.json")/ || true
+curl -s "http://127.0.0.1:${PORT}/" || true
