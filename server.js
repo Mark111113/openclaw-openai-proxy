@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 const PORT = Number(process.env.PORT || 8787);
 const OPENCLAW_AGENT = process.env.OPENCLAW_AGENT || 'main';
@@ -8,6 +8,9 @@ const OPENCLAW_PROXY_API_KEY = process.env.OPENCLAW_PROXY_API_KEY || '';
 const OPENCLAW_MODEL = process.env.OPENCLAW_MODEL || 'openclaw/main';
 const OPENCLAW_TIMEOUT_SECONDS = Number(process.env.OPENCLAW_TIMEOUT_SECONDS || 600);
 const OPENCLAW_THINKING = process.env.OPENCLAW_THINKING || '';
+const OPENCLAW_DEFAULT_MODE = process.env.OPENCLAW_DEFAULT_MODE || 'light';
+const OPENCLAW_STREAM_CHUNK_SIZE = Number(process.env.OPENCLAW_STREAM_CHUNK_SIZE || 24);
+const OPENCLAW_HOST = process.env.OPENCLAW_HOST || '127.0.0.1';
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -84,11 +87,58 @@ function flattenContent(content) {
   return String(content);
 }
 
-function buildPromptFromMessages(messages, body) {
+function resolveMode(body, req) {
+  const requested = body?.openclaw?.mode || req.headers['x-openclaw-mode'] || OPENCLAW_DEFAULT_MODE;
+  if (['passthrough', 'light', 'heavy'].includes(requested)) return requested;
+  return OPENCLAW_DEFAULT_MODE;
+}
+
+function buildModeInstructions(mode) {
+  if (mode === 'passthrough') {
+    return [
+      'Proxy mode: passthrough.',
+      'Minimize extra interpretation. Preserve the original conversation intent closely.',
+      'Do not add extra framing unless required by the conversation.',
+    ];
+  }
+  if (mode === 'heavy') {
+    return [
+      'Proxy mode: heavy.',
+      'You may do stronger reasoning and produce a more fully-developed answer when useful.',
+      'Still return only the assistant reply content, with no proxy metadata.',
+    ];
+  }
+  return [
+    'Proxy mode: light.',
+    'Be faithful to the conversation and respond normally without extra meta commentary.',
+  ];
+}
+
+function sanitizeStop(text, stop) {
+  if (!text || stop == null) return text;
+  const stops = Array.isArray(stop) ? stop : [stop];
+  let out = text;
+  for (const s of stops) {
+    if (!s || typeof s !== 'string') continue;
+    const idx = out.indexOf(s);
+    if (idx >= 0) {
+      out = out.slice(0, idx);
+    }
+  }
+  return out;
+}
+
+function buildPromptFromMessages(messages, body, mode, sessionInfo) {
   const lines = [];
   lines.push('You are serving as an OpenAI-compatible backend proxy for an external app.');
   lines.push('Return only the assistant reply content. Do not add metadata, role labels, or explanations about the proxy.');
+  lines.push(...buildModeInstructions(mode));
   lines.push('');
+
+  if (sessionInfo?.sessionKey) {
+    lines.push(`Proxy session key: ${sessionInfo.sessionKey}`);
+    lines.push('');
+  }
 
   const extras = [];
   if (body.temperature != null) extras.push(`temperature=${body.temperature}`);
@@ -133,11 +183,18 @@ function estimateTokens(text) {
   return Math.max(1, Math.ceil(String(text).length / 4));
 }
 
-function runOpenClaw(prompt) {
+function deriveSessionKey(body, req) {
+  const explicit = body?.user || req.headers['x-openclaw-user'] || req.headers['x-session-id'];
+  const source = explicit || req.socket.remoteAddress || 'anonymous';
+  const hash = createHash('sha1').update(String(source)).digest('hex').slice(0, 16);
+  return `proxy:${hash}`;
+}
+
+function runOpenClaw(prompt, opts = {}) {
   return new Promise((resolve, reject) => {
-    const args = ['agent', '--agent', OPENCLAW_AGENT, '--message', prompt, '--json'];
-    if (OPENCLAW_THINKING) {
-      args.push('--thinking', OPENCLAW_THINKING);
+    const args = ['agent', '--agent', OPENCLAW_AGENT, '--message', prompt, '--json', '--session-id', opts.sessionId];
+    if (opts.thinking) {
+      args.push('--thinking', opts.thinking);
     }
 
     const child = spawn('openclaw', args, {
@@ -185,7 +242,7 @@ function runOpenClaw(prompt) {
   });
 }
 
-function makeChatCompletionResponse({ model, messageText, promptTokens, completionTokens }) {
+function makeChatCompletionResponse({ model, messageText, promptTokens, completionTokens, meta }) {
   const created = Math.floor(Date.now() / 1000);
   return {
     id: `chatcmpl-${randomUUID()}`,
@@ -207,40 +264,53 @@ function makeChatCompletionResponse({ model, messageText, promptTokens, completi
       completion_tokens: completionTokens,
       total_tokens: promptTokens + completionTokens,
     },
+    ...(meta ? { openclaw: meta } : {}),
   };
 }
 
-function writeFakeStream(res, { model, messageText }) {
+function chunkText(text, chunkSize) {
+  const chunks = [];
+  if (!text) return [''];
+  for (let i = 0; i < text.length; i += chunkSize) {
+    chunks.push(text.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+function writeFakeStream(res, { model, messageText, includeUsage = true, usage, meta }) {
   const created = Math.floor(Date.now() / 1000);
   const id = `chatcmpl-${randomUUID()}`;
 
-  const chunks = [
-    {
-      id,
-      object: 'chat.completion.chunk',
-      created,
-      model,
-      choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
-    },
-    {
-      id,
-      object: 'chat.completion.chunk',
-      created,
-      model,
-      choices: [{ index: 0, delta: { content: messageText }, finish_reason: null }],
-    },
-    {
-      id,
-      object: 'chat.completion.chunk',
-      created,
-      model,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-    },
-  ];
+  const startChunk = {
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+  };
+  res.write(`data: ${JSON.stringify(startChunk)}\n\n`);
 
-  for (const chunk of chunks) {
+  for (const piece of chunkText(messageText, OPENCLAW_STREAM_CHUNK_SIZE)) {
+    const chunk = {
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta: { content: piece }, finish_reason: null }],
+    };
     res.write(`data: ${JSON.stringify(chunk)}\n\n`);
   }
+
+  const endChunk = {
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+    ...(includeUsage && usage ? { usage } : {}),
+    ...(meta ? { openclaw: meta } : {}),
+  };
+  res.write(`data: ${JSON.stringify(endChunk)}\n\n`);
   res.write('data: [DONE]\n\n');
   res.end();
 }
@@ -249,10 +319,16 @@ const server = http.createServer(async (req, res) => {
   try {
     if (!requireAuth(req, res)) return;
 
-    const url = new URL(req.url || '/', `http://${req.headers.host || '127.0.0.1'}`);
+    const url = new URL(req.url || '/', `http://${req.headers.host || `${OPENCLAW_HOST}:${PORT}`}`);
 
     if (req.method === 'GET' && url.pathname === '/health') {
-      return sendJson(res, 200, { ok: true, service: 'openclaw-openai-proxy', model: OPENCLAW_MODEL });
+      return sendJson(res, 200, {
+        ok: true,
+        service: 'openclaw-openai-proxy',
+        model: OPENCLAW_MODEL,
+        agent: OPENCLAW_AGENT,
+        defaultMode: OPENCLAW_DEFAULT_MODE,
+      });
     }
 
     if (req.method === 'GET' && url.pathname === '/v1/models') {
@@ -274,6 +350,9 @@ const server = http.createServer(async (req, res) => {
       const messages = Array.isArray(body.messages) ? body.messages : [];
       const model = body.model || OPENCLAW_MODEL;
       const stream = Boolean(body.stream);
+      const mode = resolveMode(body, req);
+      const sessionKey = deriveSessionKey(body, req);
+      const sessionId = `openclaw-proxy-${sessionKey}`;
 
       if (!messages.length) {
         return sendJson(res, 400, {
@@ -285,21 +364,35 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      const prompt = buildPromptFromMessages(messages, body);
-      const result = await runOpenClaw(prompt);
-      const messageText = extractAssistantText(result) || '';
+      const thinking = body?.openclaw?.thinking || req.headers['x-openclaw-thinking'] || OPENCLAW_THINKING;
+      const prompt = buildPromptFromMessages(messages, body, mode, { sessionKey });
+      const result = await runOpenClaw(prompt, { sessionId, thinking });
+      const rawMessageText = extractAssistantText(result) || '';
+      const messageText = sanitizeStop(rawMessageText, body.stop);
       const promptTokens = result?.result?.meta?.agentMeta?.usage?.input ?? estimateTokens(prompt);
       const completionTokens = result?.result?.meta?.agentMeta?.usage?.output ?? estimateTokens(messageText);
+      const usage = {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens,
+      };
+      const meta = {
+        mode,
+        agent: OPENCLAW_AGENT,
+        sessionKey,
+        upstreamModel: result?.result?.meta?.agentMeta?.model || null,
+        provider: result?.result?.meta?.agentMeta?.provider || null,
+      };
 
       if (stream) {
         sendSseHeaders(res);
-        return writeFakeStream(res, { model, messageText });
+        return writeFakeStream(res, { model, messageText, includeUsage: true, usage, meta });
       }
 
       return sendJson(
         res,
         200,
-        makeChatCompletionResponse({ model, messageText, promptTokens, completionTokens })
+        makeChatCompletionResponse({ model, messageText, promptTokens, completionTokens, meta })
       );
     }
 
@@ -321,7 +414,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[openclaw-openai-proxy] listening on http://127.0.0.1:${PORT}`);
-  console.log(`[openclaw-openai-proxy] model=${OPENCLAW_MODEL} agent=${OPENCLAW_AGENT}`);
+server.listen(PORT, OPENCLAW_HOST, () => {
+  console.log(`[openclaw-openai-proxy] listening on http://${OPENCLAW_HOST}:${PORT}`);
+  console.log(`[openclaw-openai-proxy] model=${OPENCLAW_MODEL} agent=${OPENCLAW_AGENT} defaultMode=${OPENCLAW_DEFAULT_MODE}`);
 });
