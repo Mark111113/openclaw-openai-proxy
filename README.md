@@ -1,26 +1,21 @@
-# OpenClaw OpenAI Proxy Prototype
+# OpenClaw OpenAI Proxy
 
-现在这个项目已经支持：
+A small OpenAI-compatible gateway that routes requests through OpenClaw agents.
 
-- 作为 systemd 服务运行（服务名：`claw-proxy`）
-- 使用 `config.json` 做主配置
-- 使用 `routes.json` 做通用路由配置
-- 对外暴露 OpenAI-compatible 接口
-- 按 `public model -> agent` 路由到不同 OpenClaw agent
-- 记录 usage 并通过 `/debug/usage` 查看
+## What it does
 
-## 目录结构
+- Exposes OpenAI-style endpoints:
+  - `GET /v1/models`
+  - `POST /v1/chat/completions`
+  - `POST /v1/completions`
+- Routes public models to different OpenClaw agents
+- Adds debug headers for actual upstream/provider visibility
+- Records per-request usage to local JSONL
+- Works well as a shared gateway for SillyTavern and other custom apps
 
-- `server.js`：主服务
-- `config.json`：基础配置
-- `routes.json`：模型/agent 路由配置
-- `.env`：可选环境变量覆盖
-- `claw-proxy.service`：systemd 单元文件模板
-- `data/usage.jsonl`：usage 记录
+## Supported public models
 
-## 当前对外模型
-
-`/v1/models` 现在返回：
+By default the example routing exposes:
 
 - `openclaw/st`
 - `openclaw/main`
@@ -28,15 +23,63 @@
 - `openclaw/coder`
 - `openclaw/research`
 
-## 路由规则
+## Config files
 
-当前主要按：
+Tracked in git:
 
-1. `Authorization: Bearer <apiKey>` 识别 client
-2. 请求里的 `model`
-3. 映射到 `routes.json` 中的 agent / mode / configuredUpstreamModel
+- `config.example.json`
+- `routes.example.json`
+- `.env.example`
+- `claw-proxy.service.example`
 
-## routes.json 示例
+Local-only files (ignored by git):
+
+- `config.json`
+- `routes.json`
+- `.env`
+- `data/usage.jsonl`
+
+## Quick start
+
+### 1. Prepare local config
+
+```bash
+cp config.example.json config.json
+cp routes.example.json routes.json
+cp .env.example .env
+```
+
+Edit them for the current machine.
+
+### 2. Install service
+
+```bash
+chmod +x deploy-install.sh
+sudo ./deploy-install.sh /opt/claw-proxy
+```
+
+If you keep the project somewhere else, pass that directory instead.
+
+## Example `config.json`
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8780,
+  "apiKey": "change-me",
+  "corsOrigin": "*",
+  "agent": "st",
+  "publicModel": "openclaw/main",
+  "upstreamModel": "bailian/kimi-k2.5",
+  "thinking": "",
+  "defaultMode": "light",
+  "streamChunkSize": 24,
+  "timeoutSeconds": 600,
+  "includeOpenClawMeta": false
+}
+```
+
+## Example `routes.json`
 
 ```json
 {
@@ -46,7 +89,7 @@
   },
   "clients": {
     "default": {
-      "apiKey": "mcquay2011",
+      "apiKey": "change-me",
       "defaultModel": "openclaw/st",
       "allowedModels": [
         "openclaw/st",
@@ -72,29 +115,9 @@
 }
 ```
 
-## 典型用法
+## Debug headers
 
-### SillyTavern
-
-- Base URL：`http://192.168.1.247:8787/v1`
-- API Key：`mcquay2011`
-- Model：`openclaw/st`
-
-### 普通自定义聊天应用
-
-- Base URL：`http://192.168.1.247:8787/v1`
-- API Key：`mcquay2011`
-- Model：`openclaw/main`
-
-### 写作类应用
-
-- Base URL：`http://192.168.1.247:8787/v1`
-- API Key：`mcquay2011`
-- Model：`openclaw/writer`
-
-## 调试响应头
-
-每次生成请求都会带：
+Each generation response may include:
 
 - `X-Claw-Proxy-Mode`
 - `X-Claw-Proxy-Agent`
@@ -106,14 +129,16 @@
 - `X-Claw-Proxy-Completion-Tokens`
 - `X-Claw-Proxy-Total-Tokens`
 
-## Usage 调试端点
+## Usage endpoint
 
-- `GET /debug/usage?limit=50`
+```text
+GET /debug/usage?limit=50
+```
 
-注意：
-- 只能看到启用 usage 记录之后的新请求
-- 历史请求不会自动回填逐条明细
+Notes:
+- Only requests made after usage logging was enabled are available
+- Existing historical requests are not backfilled
 
-## 说明
+## Current limitation
 
-当前流式仍是**伪流式**（先拿完整结果，再以 SSE chunk 回放）。
+Streaming is still pseudo-streaming for now: the proxy waits for the full result and then replays SSE-style chunks.

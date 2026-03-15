@@ -5,7 +5,7 @@
   },
   "clients": {
     "default": {
-      "apiKey": "mcquay2011",
+      "apiKey": "change-me",
       "defaultModel": "openclaw/st",
       "allowedModels": [
         "openclaw/st",

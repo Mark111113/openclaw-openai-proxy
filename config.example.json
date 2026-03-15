@@ -1,7 +1,7 @@
 {
   "host": "0.0.0.0",
   "port": 8780,
-  "apiKey": "mcquay2011",
+  "apiKey": "change-me",
   "corsOrigin": "*",
   "agent": "st",
   "publicModel": "openclaw/main",

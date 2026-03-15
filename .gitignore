@@ -2,3 +2,11 @@ node_modules/
 .server.pid
 server.log
 *.log
+
+# local runtime data
+data/
+
+# local machine config (keep examples in git)
+.env
+config.json
+routes.json
