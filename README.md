@@ -1,148 +1,135 @@
 # OpenClaw OpenAI Proxy Prototype
 
-一个面向接入测试的 OpenAI-compatible 原型：对外暴露 HTTP 接口，对内通过 `openclaw agent` 把请求送进 OpenClaw。
+现在这个项目已经支持：
 
-## 当前能力
+- 作为 systemd 服务运行（建议服务名：`claw-proxy`）
+- 使用 `config.json` 做手工配置
+- 使用 `.env` 覆盖部分配置
+- 对外暴露 OpenAI-compatible 接口
+- 通过 OpenClaw 处理请求
+- 在配置中**显式指定上游模型**，而不是依赖 OpenClaw 默认模型
+
+## 目录结构
+
+- `server.js`：主服务
+- `config.json`：主配置文件（推荐手工改这里）
+- `.env`：可选环境变量覆盖
+- `claw-proxy.service`：systemd 单元文件模板
+
+## 配置文件
+
+主配置文件：
+
+`/root/.openclaw/workspace/projects/openclaw-openai-proxy/config.json`
+
+示例：
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "apiKey": "change-me",
+  "corsOrigin": "*",
+  "agent": "main",
+  "publicModel": "openclaw/main",
+  "upstreamModel": "998code/gpt-5.4",
+  "thinking": "",
+  "defaultMode": "light",
+  "streamChunkSize": 24,
+  "timeoutSeconds": 600,
+  "includeOpenClawMeta": false
+}
+```
+
+## 关键配置说明
+
+### `host`
+- 控制监听地址
+- 如果要让另一台机器（如 246）访问，设成：`0.0.0.0`
+
+### `port`
+- 默认 `8787`
+
+### `apiKey`
+- 外部客户端访问时使用的 Bearer key
+- 建议一定设置，不要裸奔
+
+### `publicModel`
+- 暴露给 OpenAI-compatible 客户端的模型名
+- 例如：`openclaw/main`
+- 这是客户端看到并填写的 model
+
+### `upstreamModel`
+- **真正发给 OpenClaw 会话使用的模型**
+- 例如：`998code/gpt-5.4`
+- 这样就不需要依赖 OpenClaw 当前默认模型
+
+### `includeOpenClawMeta`
+- 是否在响应里带 `openclaw` 调试字段
+- 为了兼容客户端，默认建议 `false`
+
+## `.env`
+
+`.env` 不是必须，但可以覆盖配置。
+
+路径：
+
+`/root/.openclaw/workspace/projects/openclaw-openai-proxy/.env`
+
+注意：
+- **优先推荐改 `config.json`**
+- `.env` 更适合临时覆盖
+
+## 接口
 
 - `GET /`
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `POST /v1/completions`
-- 支持 `stream: false`
-- 支持 `stream: true`（当前仍然是**伪流式**：先拿完整结果，再按 SSE chunk 回放）
-- 支持 CORS / `OPTIONS`
-- 支持基础模式切换：`passthrough | light | heavy`
-- 支持基础会话映射骨架（按 `user` / 请求头 派生 session key）
-- 支持基础 stop 截断
 
-## 当前限制
+## systemd
 
-这还是原型，所以限制仍然明确：
+服务名建议：
 
-1. **不是原生 token streaming**，而是结果生成完再以 SSE 回放。
-2. **不支持 tool calls / images / embeddings / responses API**。
-3. 目前仍是把 OpenAI messages / prompt 转成一段文本提示，再交给 OpenClaw agent。
-4. 会话映射仍然是 proxy 层策略，不是最终版。
+`claw-proxy`
 
-## 环境变量
+单元文件模板：
 
-- `PORT`：监听端口，默认 `8787`
-- `OPENCLAW_HOST`：监听地址，默认 `127.0.0.1`
-- `OPENCLAW_AGENT`：默认 `main`
-- `OPENCLAW_PROXY_API_KEY`：可选；设置后要求 `Authorization: Bearer <key>`
-- `OPENCLAW_MODEL`：`/v1/models` 默认展示名，默认 `openclaw/main`
-- `OPENCLAW_TIMEOUT_SECONDS`：调用 `openclaw agent` 的超时，默认 `600`
-- `OPENCLAW_THINKING`：可选，传给 `openclaw agent --thinking`
-- `OPENCLAW_DEFAULT_MODE`：默认 `light`
-- `OPENCLAW_STREAM_CHUNK_SIZE`：伪流式 chunk 大小，默认 `24`
-- `OPENCLAW_CORS_ORIGIN`：默认 `*`
+`/root/.openclaw/workspace/projects/openclaw-openai-proxy/claw-proxy.service`
 
-## 模式
+推荐安装到：
 
-可通过以下方式指定：
+`/etc/systemd/system/claw-proxy.service`
 
-- 请求体：`openclaw.mode`
-- Header：`x-openclaw-mode`
-- 环境变量默认：`OPENCLAW_DEFAULT_MODE`
-
-可选值：
-
-- `passthrough`：尽量少加工
-- `light`：默认，轻处理
-- `heavy`：允许更重一点的回答风格
-
-## 会话派生
-
-当前按以下来源派生 session key：
-
-1. `body.user`
-2. `x-openclaw-user`
-3. `x-session-id`
-4. 请求来源地址
-
-## 启动
+## 启动后检查
 
 ```bash
-cd /root/.openclaw/workspace/projects/openclaw-openai-proxy
-node server.js
-```
-
-或
-
-```bash
-npm start
-```
-
-## 快速测试
-
-### 根路径
-
-```bash
+systemctl status claw-proxy --no-pager -l
 curl http://127.0.0.1:8787/
 ```
 
-### models
+如果是跨机器：
 
 ```bash
-curl http://127.0.0.1:8787/v1/models
+curl http://192.168.1.247:8787/v1/models -H 'Authorization: Bearer <apiKey>'
 ```
 
-### chat completions
+## SillyTavern 建议
 
-```bash
-curl http://127.0.0.1:8787/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "openclaw/main",
-    "messages": [
-      {"role": "system", "content": "You are concise."},
-      {"role": "user", "content": "用一句话介绍 OpenClaw"}
-    ]
-  }'
-```
+因为你现在是：
+- OpenClaw + claw-proxy 在 `192.168.1.247`
+- SillyTavern 在 `192.168.1.246`
 
-### completions
+所以建议这样填：
 
-```bash
-curl http://127.0.0.1:8787/v1/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "openclaw/main",
-    "prompt": "Reply with exactly COMPLETION_OK"
-  }'
-```
+- Base URL：`http://192.168.1.247:8787/v1`
+- API Key：`config.json` 里的 `apiKey`
+- Model：`config.json` 里的 `publicModel`
 
-### stream
+## 备注
 
-```bash
-curl -N http://127.0.0.1:8787/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "openclaw/main",
-    "stream": true,
-    "messages": [
-      {"role": "user", "content": "说一句 hello"}
-    ]
-  }'
-```
-
-## SillyTavern 接入建议
-
-先按 OpenAI 兼容方式测试：
-
-- Base URL：`http://127.0.0.1:8787/v1`
-- API Key：如果没设置 `OPENCLAW_PROXY_API_KEY`，先随便填一个占位值也行；如果设置了，就填真实值
-- Model：`openclaw/main`
-
-如果 SillyTavern 对 `/v1/chat/completions` 工作正常，就说明已经可以做第一轮联调。
-
-## 后续建议
-
-下一步最值得做：
-
-1. 改成直接对 Gateway WS 调 `chat.send`
-2. 做真正的 streaming
-3. 做更稳定的 session 映射
-4. 增加审计日志和请求记录
-5. 加更细的 SillyTavern 兼容处理
+当前仍然是原型：
+- 流式仍是伪流式
+- 还没做原生 Gateway WS 真流式
+- 但已经适合做 SillyTavern 第一轮联调

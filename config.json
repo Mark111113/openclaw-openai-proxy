@@ -1,0 +1,14 @@
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "apiKey": "mcquay2011",
+  "corsOrigin": "*",
+  "agent": "main",
+  "publicModel": "openclaw/main",
+  "upstreamModel": "bailian/kimi-k2.5",
+  "thinking": "",
+  "defaultMode": "light",
+  "streamChunkSize": 24,
+  "timeoutSeconds": 600,
+  "includeOpenClawMeta": false
+}

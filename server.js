@@ -1,17 +1,72 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
-const PORT = Number(process.env.PORT || 8787);
-const OPENCLAW_AGENT = process.env.OPENCLAW_AGENT || 'main';
-const OPENCLAW_PROXY_API_KEY = process.env.OPENCLAW_PROXY_API_KEY || '';
-const OPENCLAW_MODEL = process.env.OPENCLAW_MODEL || 'openclaw/main';
-const OPENCLAW_TIMEOUT_SECONDS = Number(process.env.OPENCLAW_TIMEOUT_SECONDS || 600);
-const OPENCLAW_THINKING = process.env.OPENCLAW_THINKING || '';
-const OPENCLAW_DEFAULT_MODE = process.env.OPENCLAW_DEFAULT_MODE || 'light';
-const OPENCLAW_STREAM_CHUNK_SIZE = Number(process.env.OPENCLAW_STREAM_CHUNK_SIZE || 24);
-const OPENCLAW_HOST = process.env.OPENCLAW_HOST || '127.0.0.1';
-const OPENCLAW_CORS_ORIGIN = process.env.OPENCLAW_CORS_ORIGIN || '*';
+const APP_DIR = path.dirname(new URL(import.meta.url).pathname);
+const CONFIG_PATH = process.env.CLAW_PROXY_CONFIG || path.join(APP_DIR, 'config.json');
+const ENV_PATH = path.join(APP_DIR, '.env');
+
+function loadDotEnv(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const raw = fs.readFileSync(filePath, 'utf8');
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1).trim();
+    if (!(key in process.env)) process.env[key] = value;
+  }
+}
+
+function loadJsonConfig(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+loadDotEnv(ENV_PATH);
+const fileConfig = loadJsonConfig(CONFIG_PATH);
+
+function pick(...values) {
+  for (const v of values) {
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return undefined;
+}
+
+function pickString(...values) {
+  const value = pick(...values);
+  return value === undefined ? '' : String(value);
+}
+
+function pickNumber(...values) {
+  const value = pick(...values);
+  return value === undefined ? undefined : Number(value);
+}
+
+function pickBoolean(...values) {
+  const value = pick(...values);
+  if (value === undefined) return false;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+}
+
+const PORT = pickNumber(process.env.PORT, fileConfig.port, 8787);
+const OPENCLAW_AGENT = pickString(process.env.OPENCLAW_AGENT, fileConfig.agent, 'main');
+const OPENCLAW_PROXY_API_KEY = pickString(process.env.OPENCLAW_PROXY_API_KEY, fileConfig.apiKey, '');
+const OPENCLAW_MODEL = pickString(process.env.OPENCLAW_MODEL, fileConfig.publicModel, 'openclaw/main');
+const OPENCLAW_UPSTREAM_MODEL = pickString(process.env.OPENCLAW_UPSTREAM_MODEL, fileConfig.upstreamModel, '');
+const OPENCLAW_TIMEOUT_SECONDS = pickNumber(process.env.OPENCLAW_TIMEOUT_SECONDS, fileConfig.timeoutSeconds, 600);
+const OPENCLAW_THINKING = pickString(process.env.OPENCLAW_THINKING, fileConfig.thinking, '');
+const OPENCLAW_DEFAULT_MODE = pickString(process.env.OPENCLAW_DEFAULT_MODE, fileConfig.defaultMode, 'light');
+const OPENCLAW_STREAM_CHUNK_SIZE = pickNumber(process.env.OPENCLAW_STREAM_CHUNK_SIZE, fileConfig.streamChunkSize, 24);
+const OPENCLAW_HOST = pickString(process.env.OPENCLAW_HOST, fileConfig.host, '127.0.0.1');
+const OPENCLAW_CORS_ORIGIN = pickString(process.env.OPENCLAW_CORS_ORIGIN, fileConfig.corsOrigin, '*');
+const INCLUDE_OPENCLAW_META = pickBoolean(process.env.OPENCLAW_INCLUDE_META, fileConfig.includeOpenClawMeta, false);
 
 function applyCors(res) {
   res.setHeader('Access-Control-Allow-Origin', OPENCLAW_CORS_ORIGIN);
@@ -112,13 +167,9 @@ function normalizePrompt(prompt) {
 
 function promptToMessages(body) {
   const messages = [];
-  if (body.system) {
-    messages.push({ role: 'system', content: body.system });
-  }
+  if (body.system) messages.push({ role: 'system', content: body.system });
   const prompt = normalizePrompt(body.prompt);
-  if (prompt) {
-    messages.push({ role: 'user', content: prompt });
-  }
+  if (prompt) messages.push({ role: 'user', content: prompt });
   return messages;
 }
 
@@ -224,15 +275,28 @@ function deriveSessionKey(body, req) {
   return `proxy:${hash}`;
 }
 
+function patchSessionModel(sessionKey, model) {
+  if (!model) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const args = ['gateway', 'call', 'sessions.patch', '--json', '--params', JSON.stringify({ key: sessionKey, model })];
+    const child = spawn('openclaw', args, { env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => (stdout += chunk.toString()));
+    child.stderr.on('data', (chunk) => (stderr += chunk.toString()));
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) return reject(new Error(stderr.trim() || stdout.trim() || `sessions.patch exited ${code}`));
+      resolve();
+    });
+  });
+}
+
 function runOpenClaw(prompt, opts = {}) {
   return new Promise((resolve, reject) => {
     const args = ['agent', '--agent', OPENCLAW_AGENT, '--message', prompt, '--json', '--session-id', opts.sessionId];
     if (opts.thinking) args.push('--thinking', opts.thinking);
-
-    const child = spawn('openclaw', args, {
-      env: { ...process.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = spawn('openclaw', args, { env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] });
 
     let stdout = '';
     let stderr = '';
@@ -245,12 +309,8 @@ function runOpenClaw(prompt, opts = {}) {
       reject(new Error(`openclaw agent timed out after ${OPENCLAW_TIMEOUT_SECONDS}s`));
     }, OPENCLAW_TIMEOUT_SECONDS * 1000);
 
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
+    child.stdout.on('data', (chunk) => (stdout += chunk.toString()));
+    child.stderr.on('data', (chunk) => (stderr += chunk.toString()));
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
@@ -261,10 +321,7 @@ function runOpenClaw(prompt, opts = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || stdout.trim() || `openclaw exited with code ${code}`));
-        return;
-      }
+      if (code !== 0) return reject(new Error(stderr.trim() || stdout.trim() || `openclaw exited with code ${code}`));
       try {
         resolve(JSON.parse(stdout));
       } catch (err) {
@@ -284,51 +341,41 @@ function buildOpenClawMeta(result, mode, sessionKey) {
   };
 }
 
+function maybeAttachMeta(obj, meta) {
+  if (!INCLUDE_OPENCLAW_META || !meta) return obj;
+  return { ...obj, openclaw: meta };
+}
+
 function makeChatCompletionResponse({ model, messageText, promptTokens, completionTokens, meta }) {
   const created = Math.floor(Date.now() / 1000);
-  return {
+  return maybeAttachMeta({
     id: `chatcmpl-${randomUUID()}`,
     object: 'chat.completion',
     created,
     model,
-    choices: [
-      {
-        index: 0,
-        message: { role: 'assistant', content: messageText },
-        finish_reason: 'stop',
-      },
-    ],
+    choices: [{ index: 0, message: { role: 'assistant', content: messageText }, finish_reason: 'stop' }],
     usage: {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
       total_tokens: promptTokens + completionTokens,
     },
-    ...(meta ? { openclaw: meta } : {}),
-  };
+  }, meta);
 }
 
 function makeCompletionResponse({ model, text, promptTokens, completionTokens, meta }) {
   const created = Math.floor(Date.now() / 1000);
-  return {
+  return maybeAttachMeta({
     id: `cmpl-${randomUUID()}`,
     object: 'text_completion',
     created,
     model,
-    choices: [
-      {
-        text,
-        index: 0,
-        logprobs: null,
-        finish_reason: 'stop',
-      },
-    ],
+    choices: [{ text, index: 0, logprobs: null, finish_reason: 'stop' }],
     usage: {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
       total_tokens: promptTokens + completionTokens,
     },
-    ...(meta ? { openclaw: meta } : {}),
-  };
+  }, meta);
 }
 
 function chunkText(text, chunkSize) {
@@ -341,34 +388,11 @@ function chunkText(text, chunkSize) {
 function writeFakeChatStream(res, { model, messageText, usage, meta }) {
   const created = Math.floor(Date.now() / 1000);
   const id = `chatcmpl-${randomUUID()}`;
-
-  res.write(`data: ${JSON.stringify({
-    id,
-    object: 'chat.completion.chunk',
-    created,
-    model,
-    choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
-  })}\n\n`);
-
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
   for (const piece of chunkText(messageText, OPENCLAW_STREAM_CHUNK_SIZE)) {
-    res.write(`data: ${JSON.stringify({
-      id,
-      object: 'chat.completion.chunk',
-      created,
-      model,
-      choices: [{ index: 0, delta: { content: piece }, finish_reason: null }],
-    })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: piece }, finish_reason: null }] })}\n\n`);
   }
-
-  res.write(`data: ${JSON.stringify({
-    id,
-    object: 'chat.completion.chunk',
-    created,
-    model,
-    choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-    usage,
-    ...(meta ? { openclaw: meta } : {}),
-  })}\n\n`);
+  res.write(`data: ${JSON.stringify(maybeAttachMeta({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage }, meta))}\n\n`);
   res.write('data: [DONE]\n\n');
   res.end();
 }
@@ -376,26 +400,10 @@ function writeFakeChatStream(res, { model, messageText, usage, meta }) {
 function writeFakeCompletionStream(res, { model, text, usage, meta }) {
   const created = Math.floor(Date.now() / 1000);
   const id = `cmpl-${randomUUID()}`;
-
   for (const piece of chunkText(text, OPENCLAW_STREAM_CHUNK_SIZE)) {
-    res.write(`data: ${JSON.stringify({
-      id,
-      object: 'text_completion',
-      created,
-      model,
-      choices: [{ text: piece, index: 0, logprobs: null, finish_reason: null }],
-    })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id, object: 'text_completion', created, model, choices: [{ text: piece, index: 0, logprobs: null, finish_reason: null }] })}\n\n`);
   }
-
-  res.write(`data: ${JSON.stringify({
-    id,
-    object: 'text_completion',
-    created,
-    model,
-    choices: [{ text: '', index: 0, logprobs: null, finish_reason: 'stop' }],
-    usage,
-    ...(meta ? { openclaw: meta } : {}),
-  })}\n\n`);
+  res.write(`data: ${JSON.stringify(maybeAttachMeta({ id, object: 'text_completion', created, model, choices: [{ text: '', index: 0, logprobs: null, finish_reason: 'stop' }], usage }, meta))}\n\n`);
   res.write('data: [DONE]\n\n');
   res.end();
 }
@@ -406,32 +414,26 @@ async function handleGeneration({ req, res, body, endpoint }) {
   const model = body.model || OPENCLAW_MODEL;
   const stream = Boolean(body.stream);
   const mode = resolveMode(body, req);
-  const sessionKey = deriveSessionKey(body, req);
-  const sessionId = `openclaw-proxy-${sessionKey}`;
+  const sessionKeyShort = deriveSessionKey(body, req);
+  const gatewaySessionKey = `agent:${OPENCLAW_AGENT}:${sessionKeyShort}`;
+  const sessionId = `openclaw-proxy-${sessionKeyShort}`;
 
   if (!messages.length) {
-    return sendJson(res, 400, {
-      error: {
-        message: isChat ? 'messages is required' : 'prompt is required',
-        type: 'invalid_request_error',
-        code: 'bad_request',
-      },
-    });
+    return sendJson(res, 400, { error: { message: isChat ? 'messages is required' : 'prompt is required', type: 'invalid_request_error', code: 'bad_request' } });
   }
 
   const thinking = body?.openclaw?.thinking || req.headers['x-openclaw-thinking'] || OPENCLAW_THINKING;
-  const prompt = buildPromptFromMessages(messages, body, mode, { sessionKey });
+  if (OPENCLAW_UPSTREAM_MODEL) {
+    await patchSessionModel(gatewaySessionKey, OPENCLAW_UPSTREAM_MODEL);
+  }
+  const prompt = buildPromptFromMessages(messages, body, mode, { sessionKey: sessionKeyShort });
   const result = await runOpenClaw(prompt, { sessionId, thinking });
   const rawText = extractAssistantText(result) || '';
   const text = sanitizeStop(rawText, body.stop);
   const promptTokens = result?.result?.meta?.agentMeta?.usage?.input ?? estimateTokens(prompt);
   const completionTokens = result?.result?.meta?.agentMeta?.usage?.output ?? estimateTokens(text);
-  const usage = {
-    prompt_tokens: promptTokens,
-    completion_tokens: completionTokens,
-    total_tokens: promptTokens + completionTokens,
-  };
-  const meta = buildOpenClawMeta(result, mode, sessionKey);
+  const usage = { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens };
+  const meta = buildOpenClawMeta(result, mode, sessionKeyShort);
 
   if (stream) {
     sendSseHeaders(res);
@@ -439,9 +441,7 @@ async function handleGeneration({ req, res, body, endpoint }) {
     return writeFakeCompletionStream(res, { model, text, usage, meta });
   }
 
-  if (isChat) {
-    return sendJson(res, 200, makeChatCompletionResponse({ model, messageText: text, promptTokens, completionTokens, meta }));
-  }
+  if (isChat) return sendJson(res, 200, makeChatCompletionResponse({ model, messageText: text, promptTokens, completionTokens, meta }));
   return sendJson(res, 200, makeCompletionResponse({ model, text, promptTokens, completionTokens, meta }));
 }
 
@@ -456,9 +456,14 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         ok: true,
         service: 'openclaw-openai-proxy',
+        configPath: CONFIG_PATH,
         model: OPENCLAW_MODEL,
+        upstreamModel: OPENCLAW_UPSTREAM_MODEL || null,
         agent: OPENCLAW_AGENT,
         defaultMode: OPENCLAW_DEFAULT_MODE,
+        host: OPENCLAW_HOST,
+        port: PORT,
+        includeOpenClawMeta: INCLUDE_OPENCLAW_META,
         endpoints: ['/v1/models', '/v1/chat/completions', '/v1/completions'],
       });
     }
@@ -466,17 +471,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/v1/models') {
       return sendJson(res, 200, {
         object: 'list',
-        data: [
-          {
-            id: OPENCLAW_MODEL,
-            object: 'model',
-            created: 0,
-            owned_by: 'openclaw',
-            permission: [],
-            root: OPENCLAW_MODEL,
-            parent: null,
-          },
-        ],
+        data: [{ id: OPENCLAW_MODEL, object: 'model', created: 0, owned_by: 'openclaw', permission: [], root: OPENCLAW_MODEL, parent: null }],
       });
     }
 
@@ -490,25 +485,14 @@ const server = http.createServer(async (req, res) => {
       return handleGeneration({ req, res, body, endpoint: 'completion' });
     }
 
-    return sendJson(res, 404, {
-      error: {
-        message: 'Not found',
-        type: 'invalid_request_error',
-        code: 'not_found',
-      },
-    });
+    return sendJson(res, 404, { error: { message: 'Not found', type: 'invalid_request_error', code: 'not_found' } });
   } catch (err) {
-    return sendJson(res, 500, {
-      error: {
-        message: err?.message || String(err),
-        type: 'server_error',
-        code: 'internal_error',
-      },
-    });
+    return sendJson(res, 500, { error: { message: err?.message || String(err), type: 'server_error', code: 'internal_error' } });
   }
 });
 
 server.listen(PORT, OPENCLAW_HOST, () => {
-  console.log(`[openclaw-openai-proxy] listening on http://${OPENCLAW_HOST}:${PORT}`);
-  console.log(`[openclaw-openai-proxy] model=${OPENCLAW_MODEL} agent=${OPENCLAW_AGENT} defaultMode=${OPENCLAW_DEFAULT_MODE}`);
+  console.log(`[claw-proxy] listening on http://${OPENCLAW_HOST}:${PORT}`);
+  console.log(`[claw-proxy] config=${CONFIG_PATH}`);
+  console.log(`[claw-proxy] publicModel=${OPENCLAW_MODEL} upstreamModel=${OPENCLAW_UPSTREAM_MODEL || '(default)'} agent=${OPENCLAW_AGENT} defaultMode=${OPENCLAW_DEFAULT_MODE}`);
 });

@@ -1,0 +1,17 @@
+[Unit]
+Description=Claw Proxy (OpenAI-compatible proxy via OpenClaw)
+After=network.target openclaw-gateway.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/.openclaw/workspace/projects/openclaw-openai-proxy
+EnvironmentFile=-/root/.openclaw/workspace/projects/openclaw-openai-proxy/.env
+Environment=PATH=/root/.nvm/versions/node/v22.22.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/root/.nvm/versions/node/v22.22.0/bin/node /root/.openclaw/workspace/projects/openclaw-openai-proxy/server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
