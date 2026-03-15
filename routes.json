@@ -1,0 +1,46 @@
+{
+  "defaults": {
+    "agent": "main",
+    "mode": "light"
+  },
+  "clients": {
+    "default": {
+      "apiKey": "mcquay2011",
+      "defaultModel": "openclaw/st",
+      "allowedModels": [
+        "openclaw/st",
+        "openclaw/main",
+        "openclaw/writer",
+        "openclaw/coder",
+        "openclaw/research"
+      ]
+    }
+  },
+  "models": {
+    "openclaw/st": {
+      "agent": "st",
+      "mode": "light",
+      "configuredUpstreamModel": "bailian/kimi-k2.5"
+    },
+    "openclaw/main": {
+      "agent": "main",
+      "mode": "light",
+      "configuredUpstreamModel": "998code/gpt-5.4"
+    },
+    "openclaw/writer": {
+      "agent": "writer",
+      "mode": "heavy",
+      "configuredUpstreamModel": "998code/gpt-5.4"
+    },
+    "openclaw/coder": {
+      "agent": "coder",
+      "mode": "light",
+      "configuredUpstreamModel": "998code/gpt-5.4"
+    },
+    "openclaw/research": {
+      "agent": "research",
+      "mode": "heavy",
+      "configuredUpstreamModel": "998code/gpt-5.4"
+    }
+  }
+}

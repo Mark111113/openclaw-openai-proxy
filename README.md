@@ -2,97 +2,102 @@
 
 现在这个项目已经支持：
 
-- 作为 systemd 服务运行（建议服务名：`claw-proxy`）
-- 使用 `config.json` 做手工配置
-- 使用 `.env` 覆盖部分配置
+- 作为 systemd 服务运行（服务名：`claw-proxy`）
+- 使用 `config.json` 做主配置
+- 使用 `routes.json` 做通用路由配置
 - 对外暴露 OpenAI-compatible 接口
-- 通过 OpenClaw 处理请求
-- 在配置中**显式指定上游模型**，而不是依赖 OpenClaw 默认模型
+- 按 `public model -> agent` 路由到不同 OpenClaw agent
+- 记录 usage 并通过 `/debug/usage` 查看
 
 ## 目录结构
 
 - `server.js`：主服务
-- `config.json`：主配置文件（推荐手工改这里）
+- `config.json`：基础配置
+- `routes.json`：模型/agent 路由配置
 - `.env`：可选环境变量覆盖
 - `claw-proxy.service`：systemd 单元文件模板
+- `data/usage.jsonl`：usage 记录
 
-## 配置文件
+## 当前对外模型
 
-主配置文件：
+`/v1/models` 现在返回：
 
-`/root/.openclaw/workspace/projects/openclaw-openai-proxy/config.json`
+- `openclaw/st`
+- `openclaw/main`
+- `openclaw/writer`
+- `openclaw/coder`
+- `openclaw/research`
 
-示例：
+## 路由规则
+
+当前主要按：
+
+1. `Authorization: Bearer <apiKey>` 识别 client
+2. 请求里的 `model`
+3. 映射到 `routes.json` 中的 agent / mode / configuredUpstreamModel
+
+## routes.json 示例
 
 ```json
 {
-  "host": "0.0.0.0",
-  "port": 8787,
-  "apiKey": "change-me",
-  "corsOrigin": "*",
-  "agent": "main",
-  "publicModel": "openclaw/main",
-  "upstreamModel": "998code/gpt-5.4",
-  "thinking": "",
-  "defaultMode": "light",
-  "streamChunkSize": 24,
-  "timeoutSeconds": 600,
-  "includeOpenClawMeta": false
+  "defaults": {
+    "agent": "main",
+    "mode": "light"
+  },
+  "clients": {
+    "default": {
+      "apiKey": "mcquay2011",
+      "defaultModel": "openclaw/st",
+      "allowedModels": [
+        "openclaw/st",
+        "openclaw/main",
+        "openclaw/writer",
+        "openclaw/coder",
+        "openclaw/research"
+      ]
+    }
+  },
+  "models": {
+    "openclaw/st": {
+      "agent": "st",
+      "mode": "light",
+      "configuredUpstreamModel": "bailian/kimi-k2.5"
+    },
+    "openclaw/main": {
+      "agent": "main",
+      "mode": "light",
+      "configuredUpstreamModel": "998code/gpt-5.4"
+    }
+  }
 }
 ```
 
-## 关键配置说明
+## 典型用法
 
-### `host`
-- 控制监听地址
-- 如果要让另一台机器（如 246）访问，设成：`0.0.0.0`
+### SillyTavern
 
-### `port`
-- 默认 `8787`
+- Base URL：`http://192.168.1.247:8787/v1`
+- API Key：`mcquay2011`
+- Model：`openclaw/st`
 
-### `apiKey`
-- 外部客户端访问时使用的 Bearer key
-- 建议一定设置，不要裸奔
+### 普通自定义聊天应用
 
-### `publicModel`
-- 暴露给 OpenAI-compatible 客户端的模型名
-- 例如：`openclaw/main`
-- 这是客户端看到并填写的 model
+- Base URL：`http://192.168.1.247:8787/v1`
+- API Key：`mcquay2011`
+- Model：`openclaw/main`
 
-### `upstreamModel`
-- **真正发给 OpenClaw 会话使用的模型**
-- 例如：`998code/gpt-5.4`
-- 这样就不需要依赖 OpenClaw 当前默认模型
+### 写作类应用
 
-### `includeOpenClawMeta`
-- 是否在响应里带 `openclaw` 调试字段
-- 为了兼容客户端，默认建议 `false`
-
-## `.env`
-
-`.env` 不是必须，但可以覆盖配置。
-
-路径：
-
-`/root/.openclaw/workspace/projects/openclaw-openai-proxy/.env`
-
-注意：
-- **优先推荐改 `config.json`**
-- `.env` 更适合临时覆盖
-
-## 接口
-
-- `GET /`
-- `GET /health`
-- `GET /v1/models`
-- `POST /v1/chat/completions`
-- `POST /v1/completions`
+- Base URL：`http://192.168.1.247:8787/v1`
+- API Key：`mcquay2011`
+- Model：`openclaw/writer`
 
 ## 调试响应头
 
-现在每次生成请求都会在响应头里带这些信息，方便你抓包确认：
+每次生成请求都会带：
 
 - `X-Claw-Proxy-Mode`
+- `X-Claw-Proxy-Agent`
 - `X-Claw-Proxy-Session`
 - `X-Claw-Proxy-Configured-Upstream-Model`
 - `X-Claw-Proxy-Actual-Upstream-Model`
@@ -101,83 +106,14 @@
 - `X-Claw-Proxy-Completion-Tokens`
 - `X-Claw-Proxy-Total-Tokens`
 
-例如：
-
-```bash
-curl -i http://127.0.0.1:8787/v1/chat/completions \
-  -H 'Authorization: Bearer <apiKey>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "openclaw/main",
-    "messages": [{"role": "user", "content": "Reply with exactly HI"}]
-  }'
-```
-
-然后直接看返回头即可确认这次请求实际命中了哪个上游模型和 token 使用量。
-
 ## Usage 调试端点
-
-新增端点：
 
 - `GET /debug/usage?limit=50`
 
-作用：
-- 查看最近请求的 token usage、实际命中模型、session key 等
-- 数据来源于 proxy 本地落盘的 `data/usage.jsonl`
-
 注意：
-- **只能看到启用 usage 记录之后的新请求**
-- 历史请求不会自动补齐成逐条明细
+- 只能看到启用 usage 记录之后的新请求
+- 历史请求不会自动回填逐条明细
 
-示例：
+## 说明
 
-```bash
-curl http://127.0.0.1:8787/debug/usage?limit=20 \
-  -H 'Authorization: Bearer <apiKey>'
-```
-
-## systemd
-
-服务名建议：
-
-`claw-proxy`
-
-单元文件模板：
-
-`/root/.openclaw/workspace/projects/openclaw-openai-proxy/claw-proxy.service`
-
-推荐安装到：
-
-`/etc/systemd/system/claw-proxy.service`
-
-## 启动后检查
-
-```bash
-systemctl status claw-proxy --no-pager -l
-curl http://127.0.0.1:8787/
-```
-
-如果是跨机器：
-
-```bash
-curl http://192.168.1.247:8787/v1/models -H 'Authorization: Bearer <apiKey>'
-```
-
-## SillyTavern 建议
-
-因为你现在是：
-- OpenClaw + claw-proxy 在 `192.168.1.247`
-- SillyTavern 在 `192.168.1.246`
-
-所以建议这样填：
-
-- Base URL：`http://192.168.1.247:8787/v1`
-- API Key：`config.json` 里的 `apiKey`
-- Model：`config.json` 里的 `publicModel`
-
-## 备注
-
-当前仍然是原型：
-- 流式仍是伪流式
-- 还没做原生 Gateway WS 真流式
-- 但已经适合做 SillyTavern 第一轮联调
+当前流式仍是**伪流式**（先拿完整结果，再以 SSE chunk 回放）。
