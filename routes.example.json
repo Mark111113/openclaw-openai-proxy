@@ -5,11 +5,12 @@
   },
   "clients": {
     "default": {
-      "apiKey": "change-me",
+      "apiKey": "your-api-key-here",
       "defaultModel": "openclaw/st",
       "allowedModels": [
         "openclaw/st",
         "openclaw/main",
+        "openclaw/glm5",
         "openclaw/writer",
         "openclaw/coder",
         "openclaw/research"
@@ -26,6 +27,11 @@
       "agent": "main",
       "mode": "light",
       "configuredUpstreamModel": "998code/gpt-5.4"
+    },
+    "openclaw/glm5": {
+      "agent": "main",
+      "mode": "light",
+      "configuredUpstreamModel": "bailian/glm-5"
     },
     "openclaw/writer": {
       "agent": "writer",
