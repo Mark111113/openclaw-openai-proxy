@@ -7,6 +7,8 @@ import path from 'node:path';
 const APP_DIR = path.dirname(new URL(import.meta.url).pathname);
 const CONFIG_PATH = process.env.CLAW_PROXY_CONFIG || path.join(APP_DIR, 'config.json');
 const ENV_PATH = path.join(APP_DIR, '.env');
+const DATA_DIR = path.join(APP_DIR, 'data');
+const USAGE_LOG_PATH = path.join(DATA_DIR, 'usage.jsonl');
 
 function loadDotEnv(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -29,6 +31,7 @@ function loadJsonConfig(filePath) {
 
 loadDotEnv(ENV_PATH);
 const fileConfig = loadJsonConfig(CONFIG_PATH);
+fs.mkdirSync(DATA_DIR, { recursive: true });
 
 function pick(...values) {
   for (const v of values) {
@@ -72,7 +75,20 @@ function applyCors(res) {
   res.setHeader('Access-Control-Allow-Origin', OPENCLAW_CORS_ORIGIN);
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-openclaw-mode, x-openclaw-thinking, x-openclaw-user, x-session-id');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Expose-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Type, X-Claw-Proxy-Mode, X-Claw-Proxy-Session, X-Claw-Proxy-Configured-Upstream-Model, X-Claw-Proxy-Actual-Upstream-Model, X-Claw-Proxy-Actual-Provider, X-Claw-Proxy-Prompt-Tokens, X-Claw-Proxy-Completion-Tokens, X-Claw-Proxy-Total-Tokens');
+}
+
+function setDebugHeaders(res, meta = {}, usage = null) {
+  if (meta.mode) res.setHeader('X-Claw-Proxy-Mode', String(meta.mode));
+  if (meta.sessionKey) res.setHeader('X-Claw-Proxy-Session', String(meta.sessionKey));
+  if (meta.configuredUpstreamModel) res.setHeader('X-Claw-Proxy-Configured-Upstream-Model', String(meta.configuredUpstreamModel));
+  if (meta.upstreamModel) res.setHeader('X-Claw-Proxy-Actual-Upstream-Model', String(meta.upstreamModel));
+  if (meta.provider) res.setHeader('X-Claw-Proxy-Actual-Provider', String(meta.provider));
+  if (usage) {
+    res.setHeader('X-Claw-Proxy-Prompt-Tokens', String(usage.prompt_tokens ?? 0));
+    res.setHeader('X-Claw-Proxy-Completion-Tokens', String(usage.completion_tokens ?? 0));
+    res.setHeader('X-Claw-Proxy-Total-Tokens', String(usage.total_tokens ?? 0));
+  }
 }
 
 function sendJson(res, status, obj) {
@@ -336,6 +352,7 @@ function buildOpenClawMeta(result, mode, sessionKey) {
     mode,
     agent: OPENCLAW_AGENT,
     sessionKey,
+    configuredUpstreamModel: OPENCLAW_UPSTREAM_MODEL || null,
     upstreamModel: result?.result?.meta?.agentMeta?.model || null,
     provider: result?.result?.meta?.agentMeta?.provider || null,
   };
@@ -344,6 +361,31 @@ function buildOpenClawMeta(result, mode, sessionKey) {
 function maybeAttachMeta(obj, meta) {
   if (!INCLUDE_OPENCLAW_META || !meta) return obj;
   return { ...obj, openclaw: meta };
+}
+
+function appendUsageRecord(record) {
+  try {
+    fs.appendFileSync(USAGE_LOG_PATH, JSON.stringify(record) + '\n', 'utf8');
+  } catch (err) {
+    console.error('[claw-proxy] failed to append usage record:', err?.message || err);
+  }
+}
+
+function readUsageRecords(limit = 50) {
+  if (!fs.existsSync(USAGE_LOG_PATH)) return [];
+  const raw = fs.readFileSync(USAGE_LOG_PATH, 'utf8');
+  const lines = raw.split(/\r?\n/).filter(Boolean);
+  const sliced = lines.slice(-Math.max(1, Math.min(limit, 500)));
+  return sliced
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .reverse();
 }
 
 function makeChatCompletionResponse({ model, messageText, promptTokens, completionTokens, meta }) {
@@ -434,6 +476,23 @@ async function handleGeneration({ req, res, body, endpoint }) {
   const completionTokens = result?.result?.meta?.agentMeta?.usage?.output ?? estimateTokens(text);
   const usage = { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens };
   const meta = buildOpenClawMeta(result, mode, sessionKeyShort);
+  setDebugHeaders(res, meta, usage);
+
+  appendUsageRecord({
+    ts: new Date().toISOString(),
+    endpoint,
+    stream,
+    mode,
+    agent: OPENCLAW_AGENT,
+    publicModel: model,
+    configuredUpstreamModel: meta.configuredUpstreamModel,
+    actualUpstreamModel: meta.upstreamModel,
+    actualProvider: meta.provider,
+    sessionKey: sessionKeyShort,
+    prompt_tokens: usage.prompt_tokens,
+    completion_tokens: usage.completion_tokens,
+    total_tokens: usage.total_tokens,
+  });
 
   if (stream) {
     sendSseHeaders(res);
@@ -464,7 +523,19 @@ const server = http.createServer(async (req, res) => {
         host: OPENCLAW_HOST,
         port: PORT,
         includeOpenClawMeta: INCLUDE_OPENCLAW_META,
-        endpoints: ['/v1/models', '/v1/chat/completions', '/v1/completions'],
+        endpoints: ['/v1/models', '/v1/chat/completions', '/v1/completions', '/debug/usage'],
+      });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/debug/usage') {
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') || 50), 500));
+      const rows = readUsageRecords(limit);
+      return sendJson(res, 200, {
+        ok: true,
+        logPath: USAGE_LOG_PATH,
+        count: rows.length,
+        note: 'Only requests made after usage logging was added are available here.',
+        rows,
       });
     }
 
@@ -495,4 +566,5 @@ server.listen(PORT, OPENCLAW_HOST, () => {
   console.log(`[claw-proxy] listening on http://${OPENCLAW_HOST}:${PORT}`);
   console.log(`[claw-proxy] config=${CONFIG_PATH}`);
   console.log(`[claw-proxy] publicModel=${OPENCLAW_MODEL} upstreamModel=${OPENCLAW_UPSTREAM_MODEL || '(default)'} agent=${OPENCLAW_AGENT} defaultMode=${OPENCLAW_DEFAULT_MODE}`);
+  console.log(`[claw-proxy] usageLog=${USAGE_LOG_PATH}`);
 });

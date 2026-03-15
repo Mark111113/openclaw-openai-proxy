@@ -88,6 +88,54 @@
 - `POST /v1/chat/completions`
 - `POST /v1/completions`
 
+## 调试响应头
+
+现在每次生成请求都会在响应头里带这些信息，方便你抓包确认：
+
+- `X-Claw-Proxy-Mode`
+- `X-Claw-Proxy-Session`
+- `X-Claw-Proxy-Configured-Upstream-Model`
+- `X-Claw-Proxy-Actual-Upstream-Model`
+- `X-Claw-Proxy-Actual-Provider`
+- `X-Claw-Proxy-Prompt-Tokens`
+- `X-Claw-Proxy-Completion-Tokens`
+- `X-Claw-Proxy-Total-Tokens`
+
+例如：
+
+```bash
+curl -i http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Authorization: Bearer <apiKey>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "openclaw/main",
+    "messages": [{"role": "user", "content": "Reply with exactly HI"}]
+  }'
+```
+
+然后直接看返回头即可确认这次请求实际命中了哪个上游模型和 token 使用量。
+
+## Usage 调试端点
+
+新增端点：
+
+- `GET /debug/usage?limit=50`
+
+作用：
+- 查看最近请求的 token usage、实际命中模型、session key 等
+- 数据来源于 proxy 本地落盘的 `data/usage.jsonl`
+
+注意：
+- **只能看到启用 usage 记录之后的新请求**
+- 历史请求不会自动补齐成逐条明细
+
+示例：
+
+```bash
+curl http://127.0.0.1:8787/debug/usage?limit=20 \
+  -H 'Authorization: Bearer <apiKey>'
+```
+
 ## systemd
 
 服务名建议：
